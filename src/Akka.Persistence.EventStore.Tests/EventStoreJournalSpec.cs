@@ -9,6 +9,7 @@
     {
         private static readonly Config SpecConfig = ConfigurationFactory.ParseString(@"
             akka {
+                test.single-expect-default = 10s
                 stdout-loglevel = DEBUG
                 loglevel = DEBUG
                 loggers = [""Akka.Logger.Serilog.SerilogLogger, Akka.Logger.Serilog""]

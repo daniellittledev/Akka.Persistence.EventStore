@@ -3,6 +3,7 @@
     using System;
     using System.Collections.Generic;
     using System.Collections.Immutable;
+    using System.Diagnostics;
     using System.Linq;
     using System.Runtime.Serialization.Formatters;
     using System.Text;
@@ -159,64 +160,45 @@
         }
 
         /// <inheritdoc />
-        protected override async Task<IImmutableList<Exception>> WriteMessagesAsync(IEnumerable<AtomicWrite> messages)
+        protected override async Task<IImmutableList<Exception>> WriteMessagesAsync(IEnumerable<AtomicWrite> atomicWrites)
         {
-            try
+            var connection = await GetConnection();
+            var results = new List<Exception>();
+            foreach (var atomicWrite in atomicWrites)
             {
-            var messagesList = messages.ToList();
-            var groupedTasks = messagesList.GroupBy(x => x.PersistenceId)
-                .ToDictionary(
-                    streamGroup => streamGroup.Key,
-                    async streamGroup =>
-                        {
-                            var persistentMessages =
-                                streamGroup.SelectMany(
-                                        atomicWrite => (IImmutableList<IPersistentRepresentation>)atomicWrite.Payload)
-                                    .ToList();
+                var persistentMessages = (IImmutableList<IPersistentRepresentation>)atomicWrite.Payload;
 
-                            var persistenceId = streamGroup.Key;
-                            var lowSequenceId = persistentMessages.Min(c => c.SequenceNr) - 2;
+                var persistenceId = atomicWrite.PersistenceId;
+                var lowSequenceId = persistentMessages.Min(c => c.SequenceNr) - 2;
 
-                            var events = persistentMessages.Select(
-                                x =>
-                                    {
-                                        var json = JsonConvert.SerializeObject(x, serializerSettings);
-                                        var data = Encoding.UTF8.GetBytes(json);
-                                         
-                                        var payloadType = x.Payload.GetType();
-                                        var metadata = GetMetadataFromPayload(payloadType, x);
-                                        var eventId = GetEventIdFromPayload(payloadType, x);
-
-                                        return new EventData(eventId, x.GetType().FullName, true, data, metadata);
-                                    }).ToArray();
-
-                            var expectedVersion = lowSequenceId < 0 ? ExpectedVersion.NoStream : (int)lowSequenceId;
-
-                            var connection = await GetConnection();
-                            try
+                try
+                {
+                    var events = persistentMessages.Select(
+                        x =>
                             {
-                                await connection.AppendToStreamAsync(persistenceId, expectedVersion, events);
-                            }
-                            catch (Exception e)
-                            {
-                                throw;
-                            }
+                                var json = JsonConvert.SerializeObject(x, serializerSettings);
+                                var data = Encoding.UTF8.GetBytes(json);
 
-                        });
+                                var payloadType = x.Payload.GetType();
+                                var metadata = GetMetadataFromPayload(payloadType, x);
+                                var eventId = GetEventIdFromPayload(payloadType, x);
 
-            return await Task<IImmutableList<Exception>>.Factory.ContinueWhenAll(
-                    groupedTasks.Values.ToArray(),
-                    tasks => messagesList.Select(
-                        m =>
-                        {
-                            var task = groupedTasks[m.PersistenceId];
-                            return task.IsFaulted ? TryUnwrapException(task.Exception) : null;
-                        }).ToImmutableList());
+                                return new EventData(eventId, x.GetType().FullName, true, data, metadata);
+                            }).ToArray();
+
+                    var pendingWrite = new { StreamId = persistenceId, ExpectedSequenceId = lowSequenceId, EventData = events, debugData = persistentMessages };
+                    var expectedVersion = pendingWrite.ExpectedSequenceId < 0 ? ExpectedVersion.NoStream : (int)pendingWrite.ExpectedSequenceId;
+
+                    await connection.AppendToStreamAsync(pendingWrite.StreamId, expectedVersion, pendingWrite.EventData);
+                    results.Add(null);
+                }
+                catch (Exception e)
+                {
+                    results.Add(TryUnwrapException(e));
+                }
             }
-            catch (Exception e)
-            {
-                throw;
-            }
+
+            return results.ToImmutableList();
         }
 
         private static Guid GetEventIdFromPayload(Type payloadType, IPersistentRepresentation x)
