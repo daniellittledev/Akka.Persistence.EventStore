@@ -1,6 +1,7 @@
 ﻿namespace Akka.Persistence.EventStore
 {
     using System;
+    using System.ComponentModel;
     using System.Linq;
     using System.Text;
     using System.Threading;
@@ -16,18 +17,24 @@
     {
         private readonly EventStoreSettings settings;
         private readonly ILoggingAdapter log;
-        private Lazy<Task<IEventStoreConnection>> connectionFactory;
         private Serializer serializer;
+
+        private IEventStoreConnection connection;
 
         public EventStoreSnapshotStore()
         {
-            settings = EventStorePersistence.Get(Context.System).JournalSettings;
+            settings = EventStorePersistence.Get(Context.System).SnapshotStoreSettings;
             log = Context.GetLogger();
+
+            var serialization = Context.System.Serialization;
+            serializer = serialization.FindSerializerForType(typeof(SelectedSnapshot));
+
+            connection = EventStoreConnection.Create(settings.ConnectionString, settings.ConnectionName);
+            connection.ConnectAsync().Wait();
         }
 
         protected override async Task<SelectedSnapshot> LoadAsync(string persistenceId, SnapshotSelectionCriteria criteria)
         {
-            var connection = await GetConnection();
             var streamName = GetStreamName(persistenceId);
             var requestedSnapVersion = (int)criteria.MaxSequenceNr;
             StreamEventsSlice slice = null;
@@ -52,12 +59,21 @@
             {
                 log.Debug("Found snapshot of {0}", persistenceId);
 
-                var @event = slice.Events
-                    .First(t => requestedSnapVersion == StreamPosition.End 
-                             || t.OriginalEvent.EventNumber == requestedSnapVersion)
-                    .OriginalEvent;
+                ResolvedEvent? resolvedEvent = null;
+                foreach (var @event in slice.Events)
+                {
+                    if (requestedSnapVersion == @event.OriginalEvent.EventNumber
+                        || requestedSnapVersion == StreamPosition.End)
+                    {
+                        resolvedEvent = @event;
+                    }
+                }
 
-                return (SelectedSnapshot)serializer.FromBinary(@event.Data, typeof(SelectedSnapshot));
+                resolvedEvent = resolvedEvent ?? new ResolvedEvent?(slice.Events.First());
+
+                var originalEvent = resolvedEvent.Value.OriginalEvent;
+
+                return (SelectedSnapshot)serializer.FromBinary(originalEvent.Data, typeof(SelectedSnapshot));
             }
 
             return null;
@@ -65,8 +81,6 @@
 
         protected override async Task SaveAsync(SnapshotMetadata metadata, object snapshot)
         {
-            var connection = await GetConnection();
-
             var streamName = GetStreamName(metadata.PersistenceId);
             var data = serializer.ToBinary(new SelectedSnapshot(metadata, snapshot));
             var eventData = new EventData(Guid.NewGuid(), typeof(Snapshot).Name, false, data, new byte[0]);
@@ -89,26 +103,6 @@
         protected override void PreStart()
         {
             base.PreStart();
-
-            var serialization = Context.System.Serialization;
-            serializer = serialization.FindSerializerForType(typeof(SelectedSnapshot));
-
-            connectionFactory = new Lazy<Task<IEventStoreConnection>>(
-                async () =>
-                {
-                    try
-                    {
-                        var eventStoreConnection = EventStoreConnection.Create(settings.ConnectionString, settings.ConnectionName);
-                        await eventStoreConnection.ConnectAsync();
-                        return eventStoreConnection;
-                    }
-                    catch (Exception e)
-                    {
-                        log.Error(e, "Failed to create a connection to EventStore");
-                        throw;
-                    }
-                },
-                LazyThreadSafetyMode.ExecutionAndPublication);
         }
 
         private static string GetStreamName(string persistenceId)
@@ -118,7 +112,8 @@
 
         private Task<IEventStoreConnection> GetConnection()
         {
-            return connectionFactory.Value;
+            return null;
+            //return connectionFactory.Value;
         }
 
 

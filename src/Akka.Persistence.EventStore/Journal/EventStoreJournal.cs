@@ -27,10 +27,9 @@
 
         private readonly ILoggingAdapter log;
         private readonly JsonSerializerSettings serializerSettings;
-        //private Lazy<Task<IEventStoreConnection>> connectionFactory;
-        //private Lazy<IEventStoreConnection> connectionFactory;
-        private IEventStoreConnection connection;
         private Serializer serializer;
+
+        private IEventStoreConnection connection;
 
         public EventStoreJournal()
         {
@@ -49,16 +48,11 @@
                 }
             };
 
-            try
-            {
-                connection = EventStoreConnection.Create("ConnectTo=tcp://admin:changeit@127.0.0.1:1113;", settings.ConnectionName);
-                connection.ConnectAsync().Wait();
-            }
-            catch (Exception e)
-            {
-                Console.WriteLine(e);
-                throw;
-            }
+            var serialization = Context.System.Serialization;
+            serializer = serialization.FindSerializerForType(typeof(SelectedSnapshot));
+
+            connection = EventStoreConnection.Create("ConnectTo=tcp://admin:changeit@127.0.0.1:1113;", settings.ConnectionName);
+            connection.ConnectAsync().Wait();
         }
 
         public override async Task ReplayMessagesAsync(
@@ -83,7 +77,6 @@
                     max = toSequenceNr - fromSequenceNr + 1;
                 }
 
-                var connection = await GetConnection();
                 var count = 0L;
                 var start = (int)fromSequenceNr - 1;
                 var localBatchSize = batchSize;
@@ -139,8 +132,6 @@
         {
             try
             {
-                var connection = await GetConnection();
-
                 var slice = await connection.ReadStreamEventsBackwardAsync(persistenceId, StreamPosition.End, 1, false);
 
                 long sequence = 0;
@@ -162,7 +153,6 @@
         /// <inheritdoc />
         protected override async Task<IImmutableList<Exception>> WriteMessagesAsync(IEnumerable<AtomicWrite> atomicWrites)
         {
-            var connection = await GetConnection();
             var results = new List<Exception>();
             foreach (var atomicWrite in atomicWrites)
             {
@@ -235,42 +225,9 @@
         /// </returns>
         protected override Task DeleteMessagesToAsync(string persistenceId, long toSequenceNr)
         {
-            //return Task.FromResult<object>(null);
-
             var tcs = new TaskCompletionSource<object>();
             tcs.SetException(new NotSupportedException());
             return tcs.Task;
-        }
-
-        protected override void PreStart()
-        {
-            base.PreStart();
-
-            var serialization = Context.System.Serialization;
-            serializer = serialization.FindSerializerForType(typeof(SelectedSnapshot));
-
-            /*connectionFactory = new Lazy<Task<IEventStoreConnection>>(
-                async () =>
-                {
-                    try
-                    {
-                        var eventStoreConnection = EventStoreConnection.Create(settings.ConnectionString, settings.ConnectionName);
-                        await eventStoreConnection.ConnectAsync();
-                        return eventStoreConnection;
-                    }
-                    catch (Exception e)
-                    {
-                        log.Error(e, "Failed to create a connection to EventStore");
-                        throw;
-                    }
-                },
-                LazyThreadSafetyMode.ExecutionAndPublication);*/
-        }
-
-        private Task<IEventStoreConnection> GetConnection()
-        {
-            return Task.FromResult(connection);
-            //return Task.FromResult(connectionFactory.Value);
         }
 
         internal class ActorRefConverter : JsonConverter
